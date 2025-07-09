@@ -1,41 +1,59 @@
-# 阶段 1: 获取 QEMU 静态二进制文件
-# Alpine 镜像本身不含 qemu, 我们需要从其他地方获取或者直接在 Alpine 中安装
-# 这里我们选择在 Alpine 中直接安装
-FROM alpine:latest AS qemu-builder
-RUN apk add --no-cache qemu-x86_64
+# 阶段 1: 使用多阶段构建来获取 qemu-static
+# 提示: GitHub Actions 会警告 --platform 使用了常量，这没关系，不影响构建。
+FROM --platform=linux/amd64 ubuntu:22.04 AS qemu_builder
+RUN apt-get update && apt-get install -y --no-install-recommends qemu-user-static && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --------------------------------------------------
 
-# 阶段 2: 最终的 Alpine 镜像
-FROM alpine:latest
+# 阶段 2: 最终的 arm64 镜像
+FROM --platform=linux/arm64 ubuntu:22.04
 
 # 从构建器阶段复制 QEMU 静态模拟器
-COPY --from=qemu-builder /usr/bin/qemu-x86_64 /usr/bin/qemu-x86_64-static
+COPY --from=qemu_builder /usr/bin/qemu-x86_64-static /usr/bin/
 
-# 安装依赖项
-# Alpine 的包名和 Ubuntu 不同
-# tzdata 用于时区设置
-# redis, supervisor, mariadb, mariadb-client, curl, ca-certificates 是核心服务
-# shadow 用于 useradd/groupadd
-# coreutils 提供 `chown` 等基本命令
-RUN apk add --no-cache \
-    tzdata \
-    redis \
-    supervisor \
-    mariadb \
-    mariadb-client \
+# 设置环境变量
+ENV TZ=Asia/Shanghai \
+    LANG=C.UTF-8 \
+    DEBIAN_FRONTEND=noninteractive
+
+# --- 步骤 1: 配置多架构软件源 ---
+# 将配置源和安装包的步骤分开，逻辑更清晰，更稳健
+RUN \
+    apt-get update && \
+    # 先安装添加新架构所必需的核心工具
+    apt-get install -y --no-install-recommends ca-certificates gnupg ubuntu-keyring && \
+    # 添加 amd64 架构
+    dpkg --add-architecture amd64 && \
+    # 再次更新，这次会同时获取 arm64 和 amd64 的包列表
+    apt-get update
+
+# --- 步骤 2: 安装所有依赖包并进行清理 ---
+RUN \
+    # 现在源已经配置好，一次性安装所有需要的包
+    apt-get install -y --no-install-recommends \
+    # 原生 arm64 包
     curl \
-    ca-certificates \
-    shadow \
-    coreutils
+    tzdata \
+    redis-server \
+    supervisor \
+    mariadb-server-10.6 \
+    # 外来 amd64 包
+    libc6:amd64 \
+    libstdc++6:amd64 \
+    libgcc-s1:amd64 && \
+    \
+    # 清理 apt 缓存，减小镜像体积
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# 设置时区为亚洲/上海
-RUN cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
-    echo "Asia/Shanghai" > /etc/timezone
-RUN mkdir -p /etc/supervisor/conf.d
+# --- 步骤 3: 其他配置 ---
+RUN \
+    # 设置时区链接
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
+    # 创建 supervisor 目录
+    mkdir -p /etc/supervisor/conf.d
 
-# --- Supervisor 配置 ---
-# (这部分无需修改，保持原样)
+# --- Supervisor 配置 (保持不变) ---
 RUN echo '[supervisord]' > /etc/supervisor/supervisord.conf && \
     echo 'nodaemon=true' >> /etc/supervisor/supervisord.conf && \
     echo 'user=root' >> /etc/supervisor/supervisord.conf && \
@@ -64,7 +82,7 @@ RUN service mariadb start && \
     mysql -u root -pIwe@12345678 -e "CREATE DATABASE iwedb;"
 
 # --- 应用文件 ---
-LABEL maintainer="spring"
+LABEL maintainer="exthirteen"
 WORKDIR /app
 COPY iwechat-src/myapp /app/myapp
 COPY iwechat-src/assets /app/assets
@@ -73,3 +91,4 @@ RUN chmod +x /app/myapp
 
 EXPOSE 8849
 CMD ["supervisord", "-c", "/etc/supervisor/supervisord.conf"]
+
