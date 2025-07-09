@@ -1,12 +1,13 @@
-# 使用多阶段构建，第一阶段仅用于获取 QEMU
-FROM multiarch/qemu-user-static:latest AS qemu
+FROM alpine:latest AS qemu-builder
+RUN apk add --no-cache qemu-x86_64
 
-# 第二阶段，主构建流程
-# 1. 基础镜像更换为 alpine
+# --------------------------------------------------
+
+# 阶段 2: 最终的 Alpine 镜像
 FROM alpine:latest
 
-# 从 qemu 阶段复制 x86_64 模拟器，这是运行 x86_64 程序的关键
-COPY --from=qemu /usr/bin/qemu-x86_64-static /usr/bin/
+# 从构建器阶段复制 QEMU 静态模拟器
+COPY --from=qemu-builder /usr/bin/qemu-x86_64 /usr/bin/qemu-x86_64-static
 
 # 2. 修改：使用 apk 替换 apt-get，并调整包名
 # Set timezone to Asia/Shanghai
