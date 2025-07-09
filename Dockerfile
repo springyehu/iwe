@@ -1,56 +1,38 @@
-# 阶段 1: 使用多阶段构建来获取 qemu-static
-FROM --platform=linux/amd64 ubuntu:22.04 AS qemu_builder
-RUN apt-get update && apt-get install -y --no-install-recommends qemu-user-static && apt-get clean && rm -rf /var/lib/apt/lists/*
+# 阶段 1: 获取 QEMU 静态二进制文件
+# Alpine 镜像本身不含 qemu, 我们需要从其他地方获取或者直接在 Alpine 中安装
+# 这里我们选择在 Alpine 中直接安装
+FROM alpine:latest AS qemu-builder
+RUN apk add --no-cache qemu-x86_64
 
 # --------------------------------------------------
 
-# 阶段 2: 最终的 arm64 镜像
-FROM --platform=linux/arm64 ubuntu:22.04
+# 阶段 2: 最终的 Alpine 镜像
+FROM alpine:latest
 
 # 从构建器阶段复制 QEMU 静态模拟器
-COPY --from=qemu_builder /usr/bin/qemu-x86_64-static /usr/bin/
+COPY --from=qemu-builder /usr/bin/qemu-x86_64 /usr/bin/qemu-x86_64-static
 
-# 设置环境变量
-ENV TZ=Asia/Shanghai \
-    LANG=C.UTF-8 \
-    DEBIAN_FRONTEND=noninteractive
-
-# 单一 RUN 层，用于安装所有依赖、配置多架构并清理
-RUN \
-    # 1. 更新包列表并安装原生 arm64 依赖
-    # *** 关键修复：添加 ubuntu-keyring 来确保 GPG 密钥是最新的 ***
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    gnupg \
+# 安装依赖项
+# Alpine 的包名和 Ubuntu 不同
+# tzdata 用于时区设置
+# redis, supervisor, mariadb, mariadb-client, curl, ca-certificates 是核心服务
+# shadow 用于 useradd/groupadd
+# coreutils 提供 `chown` 等基本命令
+RUN apk add --no-cache \
     tzdata \
-    ubuntu-keyring \
-    redis-server \
+    redis \
     supervisor \
-    mariadb-server-10.6 && \
-    \
-    # 2. 添加 amd64 架构
-    dpkg --add-architecture amd64 && \
-    \
-    # 3. 再次更新，以获取 amd64 架构的包列表 (现在应该能成功验证签名了)
-    apt-get update && \
-    \
-    # 4. 安装 myapp 所需的 x86_64 (amd64) 动态链接库
-    apt-get install -y --no-install-recommends \
-    libc6:amd64 \
-    libstdc++6:amd64 \
-    libgcc-s1:amd64 && \
-    \
-    # 5. 清理 apt 缓存，减小镜像体积
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    \
-    # 6. 设置时区链接
-    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
-    \
-    # 7. 创建 supervisor 目录
-    mkdir -p /etc/supervisor/conf.d
+    mariadb \
+    mariadb-client \
+    curl \
+    ca-certificates \
+    shadow \
+    coreutils
+
+# 设置时区为亚洲/上海
+RUN cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone
+RUN mkdir -p /etc/supervisor/conf.d
 
 # --- Supervisor 配置 ---
 # (这部分无需修改，保持原样)
@@ -82,7 +64,7 @@ RUN service mariadb start && \
     mysql -u root -pIwe@12345678 -e "CREATE DATABASE iwedb;"
 
 # --- 应用文件 ---
-LABEL maintainer="exthirteen"
+LABEL maintainer="spring"
 WORKDIR /app
 COPY iwechat-src/myapp /app/myapp
 COPY iwechat-src/assets /app/assets
