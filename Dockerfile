@@ -87,7 +87,7 @@ RUN service mariadb start && \
     mysql -u root -pIwe@12345678 -e "CREATE DATABASE iwedb;"
 
 # --- 应用文件 ---
-LABEL maintainer="exthirteen" # 或者您的ID
+LABEL maintainer="exthirteen"
 WORKDIR /app
 COPY iwechat-src/myapp /app/myapp
 COPY iwechat-src/assets /app/assets
