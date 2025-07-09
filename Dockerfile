@@ -1,20 +1,22 @@
 # 阶段 1: 使用多阶段构建来获取 qemu-static
-# (修复了 linter 警告：as -> AS)
 FROM --platform=linux/amd64 ubuntu:22.04 AS qemu_builder
 RUN apt-get update && apt-get install -y --no-install-recommends qemu-user-static && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --------------------------------------------------
 
 # 阶段 2: 最终的 arm64 镜像
-# (关于 linter 警告：在特定跨平台构建中，硬编码 platform 是明确且可接受的)
 FROM --platform=linux/arm64 ubuntu:22.04
 
 # 从构建器阶段复制 QEMU 静态模拟器
 COPY --from=qemu_builder /usr/bin/qemu-x86_64-static /usr/bin/
 
-# 设置时区和 LANG 环境变量
+# 设置环境变量
+# TZ: 设置时区
+# LANG: 设置字符集
+# DEBIAN_FRONTEND: 关键！设置为 noninteractive 以避免在 apt 安装过程中出现交互式提示
 ENV TZ=Asia/Shanghai \
-    LANG=C.UTF-8
+    LANG=C.UTF-8 \
+    DEBIAN_FRONTEND=noninteractive
 
 # 单一 RUN 层，用于安装所有依赖、配置多架构并清理
 RUN \
@@ -47,14 +49,13 @@ RUN \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     \
-    # 6. 设置时区
+    # 6. 设置时区链接
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     \
     # 7. 创建 supervisor 目录
     mkdir -p /etc/supervisor/conf.d
 
 # --- Supervisor 配置 ---
-# (这些配置可以保持不变，这里为了简洁省略，请保留您原有的配置)
 # supervisord.conf
 RUN echo '[supervisord]' > /etc/supervisor/supervisord.conf && \
     echo 'nodaemon=true' >> /etc/supervisor/supervisord.conf && \
@@ -87,7 +88,7 @@ RUN service mariadb start && \
     mysql -u root -pIwe@12345678 -e "CREATE DATABASE iwedb;"
 
 # --- 应用文件 ---
-LABEL maintainer="exthirteen"
+LABEL maintainer="spring"
 WORKDIR /app
 COPY iwechat-src/myapp /app/myapp
 COPY iwechat-src/assets /app/assets
