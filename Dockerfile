@@ -1,5 +1,4 @@
 # 阶段 1: 使用多阶段构建来获取 qemu-static
-# 提示: GitHub Actions 会警告 --platform 使用了常量，这没关系，不影响构建。
 FROM --platform=linux/amd64 ubuntu:22.04 AS qemu_builder
 RUN apt-get update && apt-get install -y --no-install-recommends qemu-user-static && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -16,23 +15,27 @@ ENV TZ=Asia/Shanghai \
     LANG=C.UTF-8 \
     DEBIAN_FRONTEND=noninteractive
 
-# --- 步骤 1: 配置多架构软件源 ---
-# 将配置源和安装包的步骤分开，逻辑更清晰，更稳健
-RUN \
-    apt-get update && \
-    # 先安装添加新架构所必需的核心工具
-    apt-get install -y --no-install-recommends ca-certificates gnupg ubuntu-keyring && \
-    # 添加 amd64 架构
-    dpkg --add-architecture amd64 && \
-    # 再次更新，这次会同时获取 arm64 和 amd64 的包列表
-    apt-get update
+# --- 关键修复：重写软件源以支持多架构 ---
+RUN echo "deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse" > /etc/apt/sources.list && \
+    echo "deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb http://archive.ubuntu.com/ubuntu/ jammy-backports main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse" >> /etc/apt/sources.list
 
-# --- 步骤 2: 安装所有依赖包并进行清理 ---
+# --- 统一的安装、配置和清理层 ---
 RUN \
-    # 现在源已经配置好，一次性安装所有需要的包
+    # 1. 更新包列表并添加 amd64 架构
+    apt-get update && \
+    dpkg --add-architecture amd64 && \
+    \
+    # 2. 再次更新，现在 apt 会从新源获取 arm64 和 amd64 的列表
+    apt-get update && \
+    \
+    # 3. 安装所有依赖包
     apt-get install -y --no-install-recommends \
     # 原生 arm64 包
+    ca-certificates \
     curl \
+    gnupg \
     tzdata \
     redis-server \
     supervisor \
@@ -42,15 +45,12 @@ RUN \
     libstdc++6:amd64 \
     libgcc-s1:amd64 && \
     \
-    # 清理 apt 缓存，减小镜像体积
+    # 4. 清理 apt 缓存
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# --- 步骤 3: 其他配置 ---
-RUN \
-    # 设置时区链接
+    rm -rf /var/lib/apt/lists/* && \
+    \
+    # 5. 其他配置
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
-    # 创建 supervisor 目录
     mkdir -p /etc/supervisor/conf.d
 
 # --- Supervisor 配置 (保持不变) ---
@@ -91,4 +91,3 @@ RUN chmod +x /app/myapp
 
 EXPOSE 8849
 CMD ["supervisord", "-c", "/etc/supervisor/supervisord.conf"]
-
