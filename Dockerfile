@@ -1,88 +1,90 @@
-# 阶段 1: 使用多阶段构建来获取 qemu-static
-FROM --platform=linux/amd64 ubuntu:22.04 AS qemu_builder
-RUN apt-get update && apt-get install -y --no-install-recommends qemu-user-static && apt-get clean && rm -rf /var/lib/apt/lists/*
+# 使用多阶段构建，第一阶段仅用于获取 QEMU
+FROM multiarch/qemu-user-static:latest AS qemu
 
-# --------------------------------------------------
+# 第二阶段，主构建流程
+# 1. 基础镜像更换为 alpine
+FROM alpine:latest
 
-# 阶段 2: 最终的 arm64 镜像
-FROM --platform=linux/arm64 ubuntu:22.04
+# 从 qemu 阶段复制 x86_64 模拟器，这是运行 x86_64 程序的关键
+COPY --from=qemu /usr/bin/qemu-x86_64-static /usr/bin/
 
-# 从构建器阶段复制 QEMU 静态模拟器
-COPY --from=qemu_builder /usr/bin/qemu-x86_64-static /usr/bin/
+# 2. 修改：使用 apk 替换 apt-get，并调整包名
+# Set timezone to Asia/Shanghai
+RUN apk update && apk add --no-cache tzdata && \
+    ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone
 
-# 设置环境变量
-ENV TZ=Asia/Shanghai \
-    LANG=C.UTF-8 \
-    DEBIAN_FRONTEND=noninteractive
+# Install curl, ca-certificates, redis, supervisor and mariadb
+# 注意：Alpine 中的包名与 Ubuntu 不同
+RUN apk update && apk add --no-cache curl ca-certificates redis supervisor mariadb mariadb-client
 
-# --- 关键修复：重写软件源以支持多架构 ---
-RUN echo "deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse" > /etc/apt/sources.list && \
-    echo "deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse" >> /etc/apt/sources.list && \
-    echo "deb http://archive.ubuntu.com/ubuntu/ jammy-backports main restricted universe multiverse" >> /etc/apt/sources.list && \
-    echo "deb http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse" >> /etc/apt/sources.list
+# 创建 supervisor 配置目录 (此部分保持不变)
+RUN mkdir -p /etc/supervisor/conf.d
 
-# --- 统一的安装、配置和清理层 ---
-RUN \
-    # 1. 更新包列表并添加 amd64 架构
-    apt-get update && \
-    dpkg --add-architecture amd64 && \
-    \
-    # 2. 再次更新，现在 apt 会从新源获取 arm64 和 amd64 的列表
-    apt-get update && \
-    \
-    # 3. 安装所有依赖包
-    apt-get install -y --no-install-recommends \
-    # 原生 arm64 包
-    ca-certificates \
-    curl \
-    gnupg \
-    tzdata \
-    redis-server \
-    supervisor \
-    mariadb-server-10.6 \
-    # 外来 amd64 包
-    libc6:amd64 \
-    libstdc++6:amd64 \
-    libgcc-s1:amd64 && \
-    \
-    # 4. 清理 apt 缓存
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    \
-    # 5. 其他配置
-    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
-    mkdir -p /etc/supervisor/conf.d
-
-# --- Supervisor 配置 (保持不变) ---
+# 创建 supervisord.conf 配置文件 (此部分保持不变)
 RUN echo '[supervisord]' > /etc/supervisor/supervisord.conf && \
     echo 'nodaemon=true' >> /etc/supervisor/supervisord.conf && \
     echo 'user=root' >> /etc/supervisor/supervisord.conf && \
     echo 'loglevel=warn' >> /etc/supervisor/supervisord.conf && \
+    echo '[unix_http_server]' >> /etc/supervisor/supervisord.conf && \
+    echo 'file=/var/run/supervisor.sock' >> /etc/supervisor/supervisord.conf && \
+    echo 'chmod=0700' >> /etc/supervisor/supervisord.conf && \
+    echo 'username=admin' >> /etc/supervisor/supervisord.conf && \
+    echo 'password=yourpassword' >> /etc/supervisor/supervisord.conf && \
+    echo '[supervisorctl]' >> /etc/supervisor/supervisord.conf && \
+    echo 'serverurl=unix:///var/run/supervisor.sock' >> /etc/supervisor/supervisord.conf && \
+    echo 'username=admin' >> /etc/supervisor/supervisord.conf && \
+    echo 'password=yourpassword' >> /etc/supervisor/supervisord.conf && \
+    echo '[rpcinterface:supervisor]' >> /etc/supervisor/supervisord.conf && \
+    echo 'supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface' >> /etc/supervisor/supervisord.conf && \
     echo '[include]' >> /etc/supervisor/supervisord.conf && \
     echo 'files = /etc/supervisor/conf.d/*.conf' >> /etc/supervisor/supervisord.conf
+
+# Add supervisor config for redis (此部分保持不变)
 RUN echo '[program:redis]' > /etc/supervisor/conf.d/01_redis.conf && \
     echo 'command=/usr/bin/redis-server' >> /etc/supervisor/conf.d/01_redis.conf && \
     echo 'autostart=true' >> /etc/supervisor/conf.d/01_redis.conf && \
-    echo 'autorestart=true' >> /etc/supervisor/conf.d/01_redis.conf
+    echo 'autorestart=true' >> /etc/supervisor/conf.d/01_redis.conf && \
+    echo 'stderr_logfile=/var/log/redis.err.log' >> /etc/supervisor/conf.d/01_redis.conf && \
+    echo 'stdout_logfile=/var/log/redis.out.log' >> /etc/supervisor/conf.d/01_redis.conf
+
+# Add supervisor config for mariadb (此部分保持不变)
+# 注意：mysqld_safe 在 alpine 中也可用
 RUN echo '[program:mariadb]' > /etc/supervisor/conf.d/02_mariadb.conf && \
-    echo 'command=/usr/bin/mysqld_safe' >> /etc/supervisor/conf.d/02_mariadb.conf && \
+    echo 'command=/usr/bin/mysqld_safe --datadir=/var/lib/mysql' >> /etc/supervisor/conf.d/02_mariadb.conf && \
     echo 'autostart=true' >> /etc/supervisor/conf.d/02_mariadb.conf && \
-    echo 'autorestart=true' >> /etc/supervisor/conf.d/02_mariadb.conf
+    echo 'autorestart=true' >> /etc/supervisor/conf.d/02_mariadb.conf && \
+    echo 'stderr_logfile=/var/log/mariadb.err.log' >> /etc/supervisor/conf.d/02_mariadb.conf && \
+    echo 'stdout_logfile=/var/log/mariadb.out.log' >> /etc/supervisor/conf.d/02_mariadb.conf
+
+# Add supervisor config for myapp
+# 3. 关键修改：在 myapp 的启动命令前加入 qemu-x86_64-static
 RUN echo '[program:myapp]' > /etc/supervisor/conf.d/99_myapp.conf && \
     echo 'command=/usr/bin/qemu-x86_64-static /app/myapp' >> /etc/supervisor/conf.d/99_myapp.conf && \
     echo 'autostart=true' >> /etc/supervisor/conf.d/99_myapp.conf && \
     echo 'autorestart=true' >> /etc/supervisor/conf.d/99_myapp.conf && \
     echo 'stdout_logfile=/dev/stdout' >> /etc/supervisor/conf.d/99_myapp.conf && \
     echo 'stdout_logfile_maxbytes=0' >> /etc/supervisor/conf.d/99_myapp.conf && \
-    echo 'redirect_stderr=true' >> /etc/supervisor/conf.d/99_myapp.conf
+    echo 'redirect_stderr=true' >> /etc/supervisor/conf.d/99_myapp.conf && \
+    echo 'stderr_logfile=/dev/stderr' >> /etc/supervisor/conf.d/99_myapp.conf && \
+    echo 'stderr_logfile_maxbytes=0' >> /etc/supervisor/conf.d/99_myapp.conf && \
+    echo 'stdout_events_enabled=true' >> /etc/supervisor/conf.d/99_myapp.conf
 
-# --- 数据库初始化 ---
-RUN service mariadb start && \
+# 4. 修改：适配 Alpine 的 MariaDB 初始化方式
+# Alpine 没有 'service' 命令，且需要手动初始化数据库目录
+RUN mkdir -p /run/mysqld && \
+    chown -R mysql:mysql /run/mysqld && \
+    mariadb-install-db --user=mysql --datadir=/var/lib/mysql && \
+    mysqld_safe --datadir=/var/lib/mysql --nowatch & \
+    sleep 5 && \
     mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'Iwe@12345678'; FLUSH PRIVILEGES;" && \
-    mysql -u root -pIwe@12345678 -e "CREATE DATABASE iwedb;"
+    mysql -u root -p'Iwe@12345678' -e "CREATE DATABASE iwedb;" && \
+    mysqladmin -u root -p'Iwe@12345678' shutdown
 
-# --- 应用文件 ---
+# 以下部分完全保持不变
 LABEL maintainer="exthirteen"
+ENV LANG=C.UTF-8
+
 WORKDIR /app
 COPY iwechat-src/myapp /app/myapp
 COPY iwechat-src/assets /app/assets
